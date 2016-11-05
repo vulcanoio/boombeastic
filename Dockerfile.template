@@ -1,0 +1,101 @@
+FROM resin/%%RESIN_MACHINE_NAME%%-node:slim
+
+# Install wget and curl
+RUN apt-get update && apt-get install -y \
+  wget \
+  curl && rm -rf /var/lib/apt/lists/*
+
+# Add Mopidy sources
+RUN wget -q -O - https://apt.mopidy.com/mopidy.gpg | apt-key add - && wget -q -O /etc/apt/sources.list.d/mopidy.list https://apt.mopidy.com/jessie.list
+
+# debian httpredir mirror proxy often ends up with 404s - editing source file to avoid it
+RUN sed -i "s/httpredir.debian.org/`curl -s -D - http://httpredir.debian.org/demo/debian/ | awk '/^Link:/ { print $2 }' | sed -e 's@<http://\(.*\)/debian/>;@\1@g'`/" /etc/apt/sources.list
+
+# Install apt deps
+RUN apt-get update && apt-get install -y \
+  apt-utils \
+  build-essential \
+  libasound2-dev \
+  libffi-dev \
+  libssl-dev \
+  python-dev \
+  python-pip \
+  python-smbus \
+  python-imaging \
+  git \
+  avahi-daemon \
+  avahi-discover \
+  libnss-mdns \
+  mopidy \
+  alsa-base \
+  alsa-utils \
+  gstreamer1.0-alsa \
+  gstreamer1.0-plugins-bad \
+  haproxy \
+  mopidy-spotify \
+  mopidy-soundcloud \
+  dnsmasq \
+  hostapd \
+  iproute2 \
+  iw \
+  libdbus-1-dev \
+  libexpat-dev \
+  rfkill && rm -rf /var/lib/apt/lists/*
+
+# Enable haproxy
+RUN echo 'ENABLED=1' >> /etc/default/haproxy
+
+# Set npm
+RUN npm config set unsafe-perm true
+
+# Update setup-tools
+RUN curl https://bootstrap.pypa.io/ez_setup.py -o - | python
+
+# Install Mopidy extensions
+RUN pip install mopidy-gmusic Mopidy-YouTube mopidy-musicbox-webclient
+
+# Save source folder
+RUN printf "%s\n" "${PWD##}" > SOURCEFOLDER
+
+# Deploy haproxy config
+COPY "$SOURCEFOLDER/Dockerbin/haproxy.cfg" /etc/haproxy/haproxy.cfg
+
+RUN mkdir -p /usr/src/app/
+
+# Move to app dir
+WORKDIR /usr/src/app
+
+# Configure Mopidy
+COPY "$SOURCEFOLDER/Dockerbin/mopidy.conf" /etc/mopidy/mopidy.conf
+
+# Configure DAC
+COPY "$SOURCEFOLDER/Dockerbin/asound.conf" /etc/asound.conf
+
+# Move package.json to filesystem
+COPY "$SOURCEFOLDER/app/package.json" ./
+
+# Install npm modules for the application
+RUN JOBS=MAX npm install --unsafe-perm --production \
+	&& npm cache clean
+
+# Move bower.json to filesystem
+COPY "$SOURCEFOLDER/app/bower.json $SOURCEFOLDER/app/.bowerrc" /usr/src/app/
+
+# Install
+RUN ./node_modules/.bin/bower --allow-root install \
+	&& ./node_modules/.bin/bower --allow-root cache clean
+
+# Move app to filesystem
+COPY "$SOURCEFOLDER/app" ./
+
+# Compile coffee
+RUN ./node_modules/.bin/coffee -c ./src
+
+# Disable haproxy service - we will manually start it later
+RUN systemctl disable haproxy
+
+## Uncomment if you want systemd
+ENV INITSYSTEM on
+
+# Start app
+CMD ["bash", "/usr/src/app/start.sh"]
